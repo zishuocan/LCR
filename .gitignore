@@ -1,0 +1,29 @@
+# CMake build directories
+/build/
+/cmake-build-*/
+/out/
+
+# Compiler and firmware artifacts
+*.o
+*.obj
+*.d
+*.su
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+
+# IDE metadata
+/.idea/
+/.vscode/
+*.user
+
+# Temporary analysis and generated files
+/tmp/
+*.log
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
