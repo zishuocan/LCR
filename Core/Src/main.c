@@ -27,6 +27,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <math.h>
 #include <stdlib.h>
 
 #include "lcr_autorange.h"
@@ -56,6 +57,10 @@
 #define LCR_CONFIRMATION_FREQUENCY_HZ 1000U
 #define LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT 10000U
 #define LCR_CURRENT_THD_LIMIT_MILLIPERCENT 10000U
+#define LCR_CAPACITIVE_THD_MARGIN_MILLIPERCENT 3000U
+#define LCR_CAPACITIVE_THD_MAX_MILLIPERCENT 30000U
+#define LCR_CAPACITIVE_PHASE_MIN_MDEG 45000L
+#define LCR_CAPACITIVE_PHASE_MAX_MDEG 135000L
 
 #define LCR_QUALITY_VOLTAGE_RAIL       (1UL << 0)
 #define LCR_QUALITY_CURRENT_RAIL       (1UL << 1)
@@ -94,11 +99,13 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static uint32_t LCR_EvaluateCaptureQuality(
   const LCR_CaptureSummary *summary,
-  const LCR_DspCaptureResult *dsp_result);
+  const LCR_DspCaptureResult *dsp_result,
+  uint32_t *current_thd_limit_millipercent);
 static void LCR_PrintCaptureQuality(
   uint32_t quality_flags,
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t current_thd_limit_millipercent,
   bool autorange_probe);
 static void LCR_PrintAutorangeReasons(uint32_t reason_flags);
 static void LCR_PrintAutorangeSelection(
@@ -240,9 +247,61 @@ static void LCR_UpdateDisplayMeasuring(uint32_t frequency_hz)
 
 static uint32_t LCR_EvaluateCaptureQuality(
   const LCR_CaptureSummary *summary,
-  const LCR_DspCaptureResult *dsp_result)
+  const LCR_DspCaptureResult *dsp_result,
+  uint32_t *current_thd_limit_millipercent)
 {
   uint32_t flags = 0U;
+  uint32_t current_thd_limit = LCR_CURRENT_THD_LIMIT_MILLIPERCENT;
+
+  /*
+   * A capacitor differentiates the excitation waveform.  Its nth current
+   * harmonic is therefore expected to be about n times the corresponding
+   * voltage harmonic.  A fixed resistor-oriented I-THD limit would reject a
+   * physically consistent capacitive waveform (observed at 10 nF: V THD
+   * about 7.5%, I THD about 17.5%).  Derive a bounded allowance only when the
+   * measured V/I phase is clearly capacitive; resistive and inductive samples
+   * retain the original 10% limit, preserving rejection of bad resistor data.
+   */
+  if (dsp_result->voltage.fundamental_valid &&
+      dsp_result->current.fundamental_valid &&
+      (dsp_result->voltage_minus_current_millidegrees >=
+       LCR_CAPACITIVE_PHASE_MIN_MDEG) &&
+      (dsp_result->voltage_minus_current_millidegrees <=
+       LCR_CAPACITIVE_PHASE_MAX_MDEG))
+  {
+    float expected_harmonic_power = 0.0f;
+    uint32_t harmonic;
+
+    for (harmonic = 2U; harmonic <= LCR_DSP_MAX_HARMONIC; ++harmonic)
+    {
+      const float expected_ratio =
+        (float)harmonic *
+        (float)dsp_result->voltage.harmonic_ratio_millipercent[harmonic];
+
+      expected_harmonic_power += expected_ratio * expected_ratio;
+    }
+    {
+      const uint32_t expected_thd =
+        (uint32_t)(sqrtf(expected_harmonic_power) + 0.5f);
+      uint32_t derived_limit = expected_thd +
+        LCR_CAPACITIVE_THD_MARGIN_MILLIPERCENT;
+
+      if (derived_limit < LCR_CURRENT_THD_LIMIT_MILLIPERCENT)
+      {
+        derived_limit = LCR_CURRENT_THD_LIMIT_MILLIPERCENT;
+      }
+      if (derived_limit > LCR_CAPACITIVE_THD_MAX_MILLIPERCENT)
+      {
+        derived_limit = LCR_CAPACITIVE_THD_MAX_MILLIPERCENT;
+      }
+      current_thd_limit = derived_limit;
+    }
+  }
+
+  if (current_thd_limit_millipercent != NULL)
+  {
+    *current_thd_limit_millipercent = current_thd_limit;
+  }
 
   if (summary->voltage.near_rail_count != 0U)
   {
@@ -268,7 +327,7 @@ static uint32_t LCR_EvaluateCaptureQuality(
   }
   if (dsp_result->current.fundamental_valid &&
       (dsp_result->current.thd_millipercent >
-       LCR_CURRENT_THD_LIMIT_MILLIPERCENT))
+       current_thd_limit))
   {
     flags |= LCR_QUALITY_CURRENT_THD_HIGH;
   }
@@ -280,6 +339,7 @@ static void LCR_PrintCaptureQuality(
   uint32_t quality_flags,
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t current_thd_limit_millipercent,
   bool autorange_probe)
 {
   if (quality_flags == 0U)
@@ -291,6 +351,13 @@ static void LCR_PrintCaptureQuality(
     else
     {
       printf("[LCR] sample quality=VALID; retained=yes; eligible_for_average=yes\r\n");
+    }
+    if (current_thd_limit_millipercent >
+        LCR_CURRENT_THD_LIMIT_MILLIPERCENT)
+    {
+      printf("[LCR] quality model=CAPACITIVE_HARMONIC; I_THD limit=%lu.%03lu%% derived from V harmonics plus margin\r\n",
+             (unsigned long)(current_thd_limit_millipercent / 1000U),
+             (unsigned long)(current_thd_limit_millipercent % 1000U));
     }
     return;
   }
@@ -323,9 +390,11 @@ static void LCR_PrintCaptureQuality(
   }
   if ((quality_flags & LCR_QUALITY_CURRENT_THD_HIGH) != 0U)
   {
-    printf(" I_THD=%lu.%03lu%%>10.000%%",
+    printf(" I_THD=%lu.%03lu%%>%lu.%03lu%%",
            (unsigned long)(dsp_result->current.thd_millipercent / 1000U),
-           (unsigned long)(dsp_result->current.thd_millipercent % 1000U));
+           (unsigned long)(dsp_result->current.thd_millipercent % 1000U),
+           (unsigned long)(current_thd_limit_millipercent / 1000U),
+           (unsigned long)(current_thd_limit_millipercent % 1000U));
   }
   printf("\r\n");
 }
@@ -1023,9 +1092,11 @@ int main(void)
               dsp_excitation_status.samples_per_period,
               &dsp_result) == HAL_OK)
           {
+          uint32_t current_thd_limit_millipercent;
           const uint32_t quality_flags = LCR_EvaluateCaptureQuality(
             &summary,
-            &dsp_result);
+            &dsp_result,
+            &current_thd_limit_millipercent);
 
           dsp_result_available = true;
           measurement_result_eligible = quality_flags == 0U;
@@ -1047,7 +1118,11 @@ int main(void)
                  (unsigned long)(dsp_result.voltage.harmonic_ratio_millipercent[5] / 1000U),
                  (unsigned long)(dsp_result.voltage.harmonic_ratio_millipercent[5] % 1000U));
           LCR_PrintCaptureQuality(
-            quality_flags, &summary, &dsp_result, autorange_probe);
+            quality_flags,
+            &summary,
+            &dsp_result,
+            current_thd_limit_millipercent,
+            autorange_probe);
           if (dsp_result.current.fundamental_valid)
           {
             LCR_ExcitationStatus excitation_status;
