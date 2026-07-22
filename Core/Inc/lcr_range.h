@@ -57,7 +57,6 @@ HAL_StatusTypeDef LCR_SetFeedbackRange(LCR_FeedbackRange range);
 HAL_StatusTypeDef LCR_SelectFeedbackRange(LCR_FeedbackRange requested_range);
 HAL_StatusTypeDef LCR_SetVoltageGain(LCR_PgaGain gain);
 HAL_StatusTypeDef LCR_SetCurrentGain(LCR_PgaGain gain);
-bool LCR_IsFeedbackRangeAvailable(LCR_FeedbackRange range);
 const LCR_FeedbackNetwork *LCR_GetFeedbackNetwork(LCR_FeedbackRange range);
 uint32_t LCR_GetPgaGainValue(LCR_PgaGain gain);
 void LCR_RangeGetStatus(LCR_RangeStatus *status);

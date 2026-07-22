@@ -22,12 +22,22 @@ typedef struct
 } LCR_CapacitanceCalibrationPoint;
 
 /*
- * Provisional reference: 93.7 kOhm measured with a DMM.
- * Mean of eight valid captures: 95301.076 - j482.744 Ohm at 10 kHz.
- * Replace this point with a commercial LCR reference before final acceptance.
+ * Provisional 93.7 kOhm references measured with a DMM.  The 100 kOhm / 1x
+ * point restores the feedback-specific coefficient recorded before the
+ * temporary hardware quarantine.  The 10 kOhm / 8x point remains a distinct
+ * profile; neither coefficient may be substituted for the other range.
+ * Replace both with commercial-LCR references before final acceptance.
  */
 static const LCR_CalibrationPoint lcr_calibration_points[] =
 {
+  {
+    10000U,
+    LCR_FEEDBACK_100K_OHM,
+    LCR_PGA_GAIN_1X,
+    LCR_PGA_GAIN_1X,
+    1.088892f,
+    -0.103684f
+  },
   {
     10000U,
     LCR_FEEDBACK_10K_OHM,

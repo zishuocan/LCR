@@ -31,6 +31,7 @@
 #include <stdlib.h>
 
 #include "lcr_autorange.h"
+#include "lcr_100k_diagnostic.h"
 #include "lcr_calibration.h"
 #include "lcr_capture.h"
 #include "lcr_component.h"
@@ -467,18 +468,6 @@ static void LCR_PrintAutorangeSelection(
            evaluation->selected_range.current_gain),
          (unsigned int)evaluation->previous_amplitude,
          (unsigned int)evaluation->selected_amplitude);
-  if (evaluation->selected_range.feedback_fallback_active)
-  {
-    const LCR_FeedbackNetwork *requested_feedback = LCR_GetFeedbackNetwork(
-      evaluation->selected_range.requested_feedback_range);
-
-    if (requested_feedback != NULL)
-    {
-      printf("[LCR] autorange fallback: requested=%lu ohm quarantined, actual=%lu ohm\r\n",
-             (unsigned long)requested_feedback->resistance_ohms,
-             (unsigned long)selected_feedback->resistance_ohms);
-    }
-  }
 }
 
 static void LCR_PrintComponentResult(
@@ -823,6 +812,7 @@ int main(void)
   }
   LCR_WorkflowInit();
   LCR_ResultInit();
+  (void)LCR_100kDiagnosticRun(false);
   {
     LCR_DisplayProbeStatus display_probe;
 
@@ -860,13 +850,10 @@ int main(void)
     LCR_ExcitationStatus status;
     LCR_RangeStatus range_status;
     const LCR_FeedbackNetwork *feedback;
-    const LCR_FeedbackNetwork *requested_feedback;
 
     LCR_ExcitationGetStatus(&status);
     LCR_RangeGetStatus(&range_status);
     feedback = LCR_GetFeedbackNetwork(range_status.feedback_range);
-    requested_feedback = LCR_GetFeedbackNetwork(
-      range_status.requested_feedback_range);
     printf("\r\n[LCR] stage 3 DFT self-test ready\r\n");
     printf("[LCR] DAC=PA4, points=%lu, requested=%lu Hz, actual=%lu Hz, amplitude=%u counts\r\n",
            (unsigned long)status.samples_per_period,
@@ -879,24 +866,14 @@ int main(void)
            (unsigned long)(feedback->capacitance_tenths_pf % 10U),
            (unsigned long)LCR_GetPgaGainValue(range_status.voltage_gain),
            (unsigned long)LCR_GetPgaGainValue(range_status.current_gain));
-    if (range_status.feedback_fallback_active)
-    {
-      printf("[LCR] feedback fallback: requested=%lu ohm is quarantined, actual=%lu ohm\r\n",
-             (unsigned long)requested_feedback->resistance_ohms,
-             (unsigned long)feedback->resistance_ohms);
-    }
     printf("[LCR] ADC mapping: low16=ADC1/PA0/V_AMP, high16=ADC2/PA1/I_AMP\r\n");
     printf("[LCR] autorange window: p2p=%u..%u counts, max adjustments=%u\r\n",
            (unsigned int)LCR_AUTORANGE_MIN_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_ADJUSTMENTS);
-    printf("[LCR] autorange current PGA maximum=%lux; all available feedback profiles remain candidates\r\n",
+    printf("[LCR] autorange current PGA maximum=%lux; all four feedback profiles remain candidates\r\n",
            (unsigned long)LCR_GetPgaGainValue(
              LCR_AUTORANGE_MAX_CURRENT_GAIN));
-    if (!LCR_IsFeedbackRangeAvailable(LCR_FEEDBACK_100K_OHM))
-    {
-      printf("[LCR] autorange policy: 100 kOhm feedback is quarantined and will be skipped\r\n");
-    }
     printf("[LCR] frequency profiles: 1/10 kHz use 64 points; up to 25 kHz use 32; 50 kHz high-frequency profile uses 16\r\n");
     printf("[LCR] output is stopped; press PC13 to autorange, then take %u captures of %u pairs\r\n",
            (unsigned int)LCR_MEASUREMENT_ATTEMPT_COUNT,

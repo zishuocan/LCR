@@ -14,29 +14,6 @@ static const LCR_FeedbackNetwork lcr_feedback_networks[LCR_FEEDBACK_RANGE_COUNT]
   {   100U,    47U}
 };
 
-/*
- * Board diagnostic, 2026-07-19:
- * code00/100 kOhm leaves TIA_OUT near the low rail. Keep the range visible
- * but quarantined, so measurement policy can fall back without lying about
- * the actual feedback network used by impedance and calibration code.
- */
-static const bool lcr_feedback_range_available[LCR_FEEDBACK_RANGE_COUNT] =
-{
-  false,
-  true,
-  true,
-  true
-};
-
-static const LCR_FeedbackRange
-  lcr_feedback_range_fallback[LCR_FEEDBACK_RANGE_COUNT] =
-{
-  LCR_FEEDBACK_10K_OHM,
-  LCR_FEEDBACK_10K_OHM,
-  LCR_FEEDBACK_1K_OHM,
-  LCR_FEEDBACK_100_OHM
-};
-
 static bool lcr_range_initialized;
 static LCR_FeedbackRange lcr_requested_feedback_range =
   LCR_FEEDBACK_100_OHM;
@@ -133,7 +110,6 @@ HAL_StatusTypeDef LCR_SetFeedbackRange(LCR_FeedbackRange range)
 
 HAL_StatusTypeDef LCR_SelectFeedbackRange(LCR_FeedbackRange requested_range)
 {
-  LCR_FeedbackRange actual_range;
   HAL_StatusTypeDef status;
 
   if (!lcr_range_initialized ||
@@ -142,14 +118,11 @@ HAL_StatusTypeDef LCR_SelectFeedbackRange(LCR_FeedbackRange requested_range)
     return HAL_ERROR;
   }
 
-  actual_range = lcr_feedback_range_available[(uint32_t)requested_range] ?
-    requested_range :
-    lcr_feedback_range_fallback[(uint32_t)requested_range];
-  status = LCR_SetFeedbackRange(actual_range);
+  status = LCR_SetFeedbackRange(requested_range);
   if (status == HAL_OK)
   {
     lcr_requested_feedback_range = requested_range;
-    lcr_feedback_fallback_active = actual_range != requested_range;
+    lcr_feedback_fallback_active = false;
   }
   return status;
 }
@@ -206,15 +179,6 @@ uint32_t LCR_GetPgaGainValue(LCR_PgaGain gain)
     return 0U;
   }
   return 1UL << (uint32_t)gain;
-}
-
-bool LCR_IsFeedbackRangeAvailable(LCR_FeedbackRange range)
-{
-  if ((uint32_t)range >= (uint32_t)LCR_FEEDBACK_RANGE_COUNT)
-  {
-    return false;
-  }
-  return lcr_feedback_range_available[(uint32_t)range];
 }
 
 void LCR_RangeGetStatus(LCR_RangeStatus *status)

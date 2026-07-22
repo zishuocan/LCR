@@ -27,6 +27,8 @@
 
 ## 2. 当前硬件配置
 
+完整的逐线还原说明见`.agents/hardware_wiring.md`。该文件包含NUCLEO连接器针号、LCR板J1/J2/J3/J5/J6/J7针号、OLED、电源、DUT Kelvin并接方式和上电自检；本节仅保留软件设计所需的信号摘要。
+
 ### 模拟信号
 
 | MCU 引脚 | 外设功能 | LCR 板信号 |

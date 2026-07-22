@@ -73,11 +73,6 @@ static bool LCR_AutorangeFindCurrentProfile(
     const LCR_FeedbackRange range = (LCR_FeedbackRange)range_index;
     uint32_t gain_index;
 
-    if (!LCR_IsFeedbackRangeAvailable(range))
-    {
-      continue;
-    }
-
     for (gain_index = 0U;
          gain_index <= (uint32_t)LCR_AUTORANGE_MAX_CURRENT_GAIN;
          ++gain_index)

@@ -44,6 +44,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Core/Src/lcr_100k_diagnostic.c
     Core/Src/lcr_autorange.c
     Core/Src/lcr_calibration.c
     Core/Src/lcr_capture.c
