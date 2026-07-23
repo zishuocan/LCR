@@ -20,7 +20,6 @@ static LCR_FeedbackRange lcr_requested_feedback_range =
 static LCR_FeedbackRange lcr_feedback_range = LCR_FEEDBACK_100_OHM;
 static LCR_PgaGain lcr_voltage_gain = LCR_PGA_GAIN_1X;
 static LCR_PgaGain lcr_current_gain = LCR_PGA_GAIN_1X;
-static bool lcr_feedback_fallback_active;
 
 static void LCR_SetGainAddress(LCR_PgaGain gain)
 {
@@ -104,7 +103,6 @@ HAL_StatusTypeDef LCR_SetFeedbackRange(LCR_FeedbackRange range)
     ((code & 0x1U) != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
   lcr_requested_feedback_range = range;
   lcr_feedback_range = range;
-  lcr_feedback_fallback_active = false;
   return HAL_OK;
 }
 
@@ -122,7 +120,6 @@ HAL_StatusTypeDef LCR_SelectFeedbackRange(LCR_FeedbackRange requested_range)
   if (status == HAL_OK)
   {
     lcr_requested_feedback_range = requested_range;
-    lcr_feedback_fallback_active = false;
   }
   return status;
 }
@@ -192,5 +189,4 @@ void LCR_RangeGetStatus(LCR_RangeStatus *status)
   status->feedback_range = lcr_feedback_range;
   status->voltage_gain = lcr_voltage_gain;
   status->current_gain = lcr_current_gain;
-  status->feedback_fallback_active = lcr_feedback_fallback_active;
 }

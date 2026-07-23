@@ -19,6 +19,16 @@ static uint64_t LCR_ComponentAbsoluteInt32(int32_t value)
   return (value < 0) ? (uint64_t)(-(int64_t)value) : (uint64_t)value;
 }
 
+static bool LCR_ComponentWithinTenPercent(uint64_t first, uint64_t second)
+{
+  const uint64_t maximum = (first > second) ? first : second;
+  const uint64_t difference = (first > second) ?
+    first - second : second - first;
+
+  return (maximum != 0ULL) &&
+         ((difference * 100ULL) <= (maximum * 10ULL));
+}
+
 static void LCR_ComponentInitializeResult(
   const LCR_ImpedanceResult *impedance,
   LCR_ComponentResult *result)
@@ -118,10 +128,8 @@ HAL_StatusTypeDef LCR_ComponentConfirm(
   uint32_t second_frequency_hz,
   LCR_ComponentResult *result)
 {
-  const LCR_ImpedanceResult *low_frequency_impedance;
-  const LCR_ImpedanceResult *high_frequency_impedance;
-  uint32_t low_frequency_hz;
-  uint32_t high_frequency_hz;
+  LCR_ComponentResult first_component;
+  LCR_ComponentResult second_component;
   uint64_t first_abs_phase;
   uint64_t second_abs_phase;
   uint64_t first_abs_reactance;
@@ -138,21 +146,6 @@ HAL_StatusTypeDef LCR_ComponentConfirm(
       (first_frequency_hz == second_frequency_hz))
   {
     return HAL_ERROR;
-  }
-
-  if (first_frequency_hz < second_frequency_hz)
-  {
-    low_frequency_impedance = first_impedance;
-    low_frequency_hz = first_frequency_hz;
-    high_frequency_impedance = second_impedance;
-    high_frequency_hz = second_frequency_hz;
-  }
-  else
-  {
-    low_frequency_impedance = second_impedance;
-    low_frequency_hz = second_frequency_hz;
-    high_frequency_impedance = first_impedance;
-    high_frequency_hz = first_frequency_hz;
   }
 
   LCR_ComponentInitializeResult(first_impedance, result);
@@ -185,38 +178,47 @@ HAL_StatusTypeDef LCR_ComponentConfirm(
        (resistance_maximum * 20ULL)))
   {
     result->type = LCR_COMPONENT_RESISTOR;
-    result->series_resistance_milliohms = (int32_t)
-      (((int64_t)first_impedance->resistance_milliohms +
-        (int64_t)second_impedance->resistance_milliohms) / 2LL);
-    result->parameter_frequency_hz = high_frequency_hz;
+    result->series_resistance_milliohms =
+      first_impedance->resistance_milliohms;
+    result->parameter_frequency_hz = first_frequency_hz;
     result->parameter_valid = true;
     result->needs_frequency_confirmation = false;
     return HAL_OK;
   }
 
-  /* Capacitive reactance magnitude grows as frequency is reduced. */
-  if ((low_frequency_impedance->reactance_milliohms < 0) &&
-      (high_frequency_impedance->reactance_milliohms < 0) &&
-      (LCR_ComponentAbsoluteInt32(
-         low_frequency_impedance->reactance_milliohms) * 2ULL >=
-       LCR_ComponentAbsoluteInt32(
-         high_frequency_impedance->reactance_milliohms) * 3ULL))
+  /* Confirm C from each frequency independently; retain the 10 kHz primary. */
+  if ((first_impedance->reactance_milliohms < 0) &&
+      (second_impedance->reactance_milliohms < 0))
   {
     LCR_ComponentSetCapacitor(
-      low_frequency_impedance, low_frequency_hz, result);
+      first_impedance, first_frequency_hz, &first_component);
+    LCR_ComponentSetCapacitor(
+      second_impedance, second_frequency_hz, &second_component);
+    if (first_component.parameter_valid && second_component.parameter_valid &&
+        LCR_ComponentWithinTenPercent(
+          first_component.capacitance_picofarads,
+          second_component.capacitance_picofarads))
+    {
+      *result = first_component;
+    }
     return HAL_OK;
   }
 
-  /* Inductive reactance magnitude grows as frequency is increased. */
-  if ((low_frequency_impedance->reactance_milliohms > 0) &&
-      (high_frequency_impedance->reactance_milliohms > 0) &&
-      (LCR_ComponentAbsoluteInt32(
-         high_frequency_impedance->reactance_milliohms) * 2ULL >=
-       LCR_ComponentAbsoluteInt32(
-         low_frequency_impedance->reactance_milliohms) * 3ULL))
+  /* Confirm L from each frequency independently; retain the 10 kHz primary. */
+  if ((first_impedance->reactance_milliohms > 0) &&
+      (second_impedance->reactance_milliohms > 0))
   {
     LCR_ComponentSetInductor(
-      high_frequency_impedance, high_frequency_hz, result);
+      first_impedance, first_frequency_hz, &first_component);
+    LCR_ComponentSetInductor(
+      second_impedance, second_frequency_hz, &second_component);
+    if (first_component.parameter_valid && second_component.parameter_valid &&
+        LCR_ComponentWithinTenPercent(
+          first_component.inductance_nanohenries,
+          second_component.inductance_nanohenries))
+    {
+      *result = first_component;
+    }
   }
 
   return HAL_OK;

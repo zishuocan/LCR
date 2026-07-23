@@ -123,7 +123,6 @@ HAL_StatusTypeDef LCR_100kDiagnosticRun(bool run_reference_validation)
   if ((status != HAL_OK) || (feedback == NULL) ||
       (range.requested_feedback_range != LCR_FEEDBACK_100K_OHM) ||
       (range.feedback_range != LCR_FEEDBACK_100K_OHM) ||
-      range.feedback_fallback_active ||
       (range.voltage_gain != LCR_PGA_GAIN_1X) ||
       (range.current_gain != LCR_PGA_GAIN_1X))
   {

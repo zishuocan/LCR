@@ -1,45 +1,70 @@
 #include "lcr_autorange.h"
+#include "lcr_calibration.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stddef.h>
+
+#define LCR_AUTORANGE_PI 3.14159265358979323846
+#define LCR_AUTORANGE_INDUCTOR_FREQUENCY_HZ 50000U
+#define LCR_AUTORANGE_INDUCTOR_MIN_V_GAIN LCR_PGA_GAIN_8X
+#define LCR_AUTORANGE_INDUCTOR_MAX_V_GAIN LCR_PGA_GAIN_64X
+#define LCR_AUTORANGE_INDUCTOR_I_GAIN LCR_PGA_GAIN_2X
+#define LCR_AUTORANGE_INDUCTOR_LOW_I_GAIN LCR_PGA_GAIN_1X
+
+static bool LCR_AutorangeRangeAllowed(
+  LCR_FeedbackRange range,
+  uint32_t frequency_hz)
+{
+  if (frequency_hz == LCR_AUTORANGE_INDUCTOR_FREQUENCY_HZ)
+  {
+    return range == LCR_FEEDBACK_100_OHM;
+  }
+  return true;
+}
 
 static uint32_t LCR_AutorangeSensitivity(
   LCR_FeedbackRange feedback_range,
-  LCR_PgaGain current_gain)
+  LCR_PgaGain current_gain,
+  uint32_t frequency_hz)
 {
   const LCR_FeedbackNetwork *feedback =
     LCR_GetFeedbackNetwork(feedback_range);
   const uint32_t gain = LCR_GetPgaGainValue(current_gain);
+  double capacitance_f;
+  double omega_rc;
+  double feedback_magnitude;
+  double sensitivity;
 
-  if ((feedback == NULL) || (gain == 0U))
+  if ((feedback == NULL) || (gain == 0U) || (frequency_hz == 0U))
   {
     return 0U;
   }
-  return feedback->resistance_ohms * gain;
-}
 
-static bool LCR_AutorangeCandidatePreferred(
-  LCR_FeedbackRange candidate_range,
-  LCR_FeedbackRange selected_range)
-{
-  const LCR_FeedbackNetwork *candidate =
-    LCR_GetFeedbackNetwork(candidate_range);
-  const LCR_FeedbackNetwork *selected =
-    LCR_GetFeedbackNetwork(selected_range);
-
-  return (candidate != NULL) && (selected != NULL) &&
-         (candidate->resistance_ohms > selected->resistance_ohms);
+  capacitance_f =
+    (double)feedback->capacitance_tenths_pf * 1.0e-13;
+  omega_rc = 2.0 * LCR_AUTORANGE_PI * (double)frequency_hz *
+    (double)feedback->resistance_ohms * capacitance_f;
+  feedback_magnitude = (double)feedback->resistance_ohms /
+    sqrt(1.0 + (omega_rc * omega_rc));
+  sensitivity = feedback_magnitude * (double)gain;
+  if (sensitivity >= (double)UINT_MAX)
+  {
+    return UINT_MAX;
+  }
+  return (uint32_t)(sensitivity + 0.5);
 }
 
 static bool LCR_AutorangeFindCurrentProfile(
   const LCR_RangeStatus *status,
+  uint32_t frequency_hz,
   bool increase,
   uint32_t factor,
   LCR_FeedbackRange *selected_range,
   LCR_PgaGain *selected_gain)
 {
   const uint32_t current = LCR_AutorangeSensitivity(
-    status->feedback_range, status->current_gain);
+    status->feedback_range, status->current_gain, frequency_hz);
   uint32_t target;
   uint32_t best = increase ? UINT_MAX : 0U;
   uint32_t fallback = increase ? 0U : UINT_MAX;
@@ -73,29 +98,30 @@ static bool LCR_AutorangeFindCurrentProfile(
     const LCR_FeedbackRange range = (LCR_FeedbackRange)range_index;
     uint32_t gain_index;
 
+    if (!LCR_AutorangeRangeAllowed(range, frequency_hz))
+    {
+      continue;
+    }
+
     for (gain_index = 0U;
          gain_index <= (uint32_t)LCR_AUTORANGE_MAX_CURRENT_GAIN;
          ++gain_index)
     {
       const LCR_PgaGain gain = (LCR_PgaGain)gain_index;
       const uint32_t sensitivity =
-        LCR_AutorangeSensitivity(range, gain);
+        LCR_AutorangeSensitivity(range, gain, frequency_hz);
 
       if (increase && (sensitivity > current))
       {
         if ((sensitivity >= target) &&
-            (!best_valid || (sensitivity < best) ||
-             ((sensitivity == best) &&
-              LCR_AutorangeCandidatePreferred(range, best_range))))
+            (!best_valid || (sensitivity < best)))
         {
           best = sensitivity;
           best_range = range;
           best_gain = gain;
           best_valid = true;
         }
-        if (!fallback_valid || (sensitivity > fallback) ||
-            ((sensitivity == fallback) &&
-             LCR_AutorangeCandidatePreferred(range, fallback_range)))
+        if (!fallback_valid || (sensitivity > fallback))
         {
           fallback = sensitivity;
           fallback_range = range;
@@ -106,18 +132,14 @@ static bool LCR_AutorangeFindCurrentProfile(
       else if (!increase && (sensitivity < current))
       {
         if ((sensitivity <= target) &&
-            (!best_valid || (sensitivity > best) ||
-             ((sensitivity == best) &&
-              LCR_AutorangeCandidatePreferred(range, best_range))))
+            (!best_valid || (sensitivity > best)))
         {
           best = sensitivity;
           best_range = range;
           best_gain = gain;
           best_valid = true;
         }
-        if (!fallback_valid || (sensitivity < fallback) ||
-            ((sensitivity == fallback) &&
-             LCR_AutorangeCandidatePreferred(range, fallback_range)))
+        if (!fallback_valid || (sensitivity < fallback))
         {
           fallback = sensitivity;
           fallback_range = range;
@@ -171,6 +193,8 @@ static HAL_StatusTypeDef LCR_AutorangeApplyCurrentProfile(
 HAL_StatusTypeDef LCR_AutorangeBegin(LCR_AutorangeSession *session)
 {
   HAL_StatusTypeDef status;
+  LCR_ExcitationStatus excitation;
+  bool inductor_profile;
 
   if (session == NULL)
   {
@@ -182,15 +206,23 @@ HAL_StatusTypeDef LCR_AutorangeBegin(LCR_AutorangeSession *session)
   session->adjustment_count = 0U;
   session->last_reason_flags = 0U;
 
+  LCR_ExcitationGetStatus(&excitation);
+  inductor_profile =
+    excitation.actual_frequency_hz == LCR_AUTORANGE_INDUCTOR_FREQUENCY_HZ;
+
   /* Always enter a measurement from a known, lowest-sensitivity setup. */
   status = LCR_SetAmplitude(LCR_EXCITATION_DEFAULT_AMPLITUDE);
   if (status == HAL_OK)
   {
-    status = LCR_SetVoltageGain(LCR_PGA_GAIN_1X);
+    status = LCR_SetVoltageGain(
+      inductor_profile ? LCR_AUTORANGE_INDUCTOR_MIN_V_GAIN :
+                         LCR_PGA_GAIN_1X);
   }
   if (status == HAL_OK)
   {
-    status = LCR_SetCurrentGain(LCR_PGA_GAIN_1X);
+    status = LCR_SetCurrentGain(
+      inductor_profile ? LCR_AUTORANGE_INDUCTOR_I_GAIN :
+                         LCR_PGA_GAIN_1X);
   }
   if (status == HAL_OK)
   {
@@ -211,6 +243,8 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
   LCR_AutorangeSession *session,
   const LCR_CaptureSummary *capture,
   const LCR_DspCaptureResult *dsp,
+  bool voltage_thd_ok,
+  bool current_thd_ok,
   LCR_AutorangeEvaluation *evaluation)
 {
   LCR_RangeStatus previous;
@@ -223,10 +257,13 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
   bool voltage_low;
   bool current_high;
   bool current_low;
+  bool voltage_reduce;
+  bool current_reduce;
   bool reduce_amplitude = false;
   uint32_t amplitude_reduction_factor = 2U;
   uint16_t selected_amplitude;
   bool configuration_possible = true;
+  bool inductor_profile;
   HAL_StatusTypeDef status = HAL_OK;
 
   if ((session == NULL) || (capture == NULL) || (dsp == NULL) ||
@@ -238,6 +275,8 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
 
   LCR_RangeGetStatus(&previous);
   LCR_ExcitationGetStatus(&excitation);
+  inductor_profile =
+    excitation.actual_frequency_hz == LCR_AUTORANGE_INDUCTOR_FREQUENCY_HZ;
   evaluation->previous_range = previous;
   evaluation->selected_range = previous;
   evaluation->previous_amplitude = excitation.amplitude;
@@ -246,18 +285,30 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
 
   voltage_high = (capture->voltage.near_rail_count != 0U) ||
                  (capture->voltage.peak_to_peak >
-                  LCR_AUTORANGE_MAX_P2P_COUNTS);
+                  LCR_AUTORANGE_MAX_P2P_COUNTS) ||
+                 (dsp->voltage.fundamental_valid &&
+                  (dsp->voltage.bin[1].magnitude_milli_counts >
+                   LCR_AUTORANGE_MAX_H1_MILLI_COUNTS));
   voltage_low = !voltage_high &&
                 (!dsp->voltage.fundamental_valid ||
+                 (dsp->voltage.bin[1].magnitude_milli_counts <
+                  LCR_AUTORANGE_MIN_H1_MILLI_COUNTS) ||
                  (capture->voltage.peak_to_peak <
-                  LCR_AUTORANGE_MIN_P2P_COUNTS));
+                  LCR_AUTORANGE_MIN_AUX_P2P_COUNTS));
   current_high = (capture->current.near_rail_count != 0U) ||
                  (capture->current.peak_to_peak >
-                  LCR_AUTORANGE_MAX_P2P_COUNTS);
+                  LCR_AUTORANGE_MAX_P2P_COUNTS) ||
+                 (dsp->current.fundamental_valid &&
+                  (dsp->current.bin[1].magnitude_milli_counts >
+                   LCR_AUTORANGE_MAX_H1_MILLI_COUNTS));
   current_low = !current_high &&
                 (!dsp->current.fundamental_valid ||
+                 (dsp->current.bin[1].magnitude_milli_counts <
+                  LCR_AUTORANGE_MIN_H1_MILLI_COUNTS) ||
                  (capture->current.peak_to_peak <
-                  LCR_AUTORANGE_MIN_P2P_COUNTS));
+                  LCR_AUTORANGE_MIN_AUX_P2P_COUNTS));
+  voltage_reduce = voltage_high || (!voltage_low && !voltage_thd_ok);
+  current_reduce = current_high || (!current_low && !current_thd_ok);
 
   if (voltage_high)
   {
@@ -275,11 +326,30 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
   {
     reasons |= LCR_AUTORANGE_REASON_I_LOW;
   }
+  if (!voltage_thd_ok)
+  {
+    reasons |= LCR_AUTORANGE_REASON_V_THD_HIGH;
+  }
+  if (!current_thd_ok)
+  {
+    reasons |= LCR_AUTORANGE_REASON_I_THD_HIGH;
+  }
 
   session->last_reason_flags = reasons;
   evaluation->reason_flags = reasons;
   if (reasons == 0U)
   {
+    if (inductor_profile &&
+        !LCR_CalibrationIsInductorProfileSupported(
+          previous.feedback_range,
+          previous.voltage_gain,
+          previous.current_gain))
+    {
+      session->state = LCR_AUTORANGE_FAILED;
+      evaluation->reason_flags = LCR_AUTORANGE_REASON_APPLY_FAILED;
+      evaluation->decision = LCR_AUTORANGE_REJECTED;
+      return HAL_OK;
+    }
     session->state = LCR_AUTORANGE_LOCKED;
     evaluation->decision = LCR_AUTORANGE_ACCEPTED;
     return HAL_OK;
@@ -303,11 +373,18 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
   if (voltage_low)
   {
     const uint32_t step =
-      (capture->voltage.peak_to_peak <
-       (LCR_AUTORANGE_MIN_P2P_COUNTS / 4U)) ? 2U : 1U;
+      (!dsp->voltage.fundamental_valid ||
+       (dsp->voltage.bin[1].magnitude_milli_counts <
+        (LCR_AUTORANGE_MIN_H1_MILLI_COUNTS / 4U))) ? 2U : 1U;
     const uint32_t selected = (uint32_t)previous.voltage_gain + step;
 
-    if (selected >= (uint32_t)LCR_PGA_GAIN_COUNT)
+    if (inductor_profile &&
+        (selected > (uint32_t)LCR_AUTORANGE_INDUCTOR_MAX_V_GAIN))
+    {
+      reasons |= LCR_AUTORANGE_REASON_V_LIMIT;
+      configuration_possible = false;
+    }
+    else if (selected >= (uint32_t)LCR_PGA_GAIN_COUNT)
     {
       reasons |= LCR_AUTORANGE_REASON_V_LIMIT;
       configuration_possible = false;
@@ -317,12 +394,23 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
       selected_voltage_gain = (LCR_PgaGain)selected;
     }
   }
-  else if (voltage_high)
+  else if (voltage_reduce)
   {
     const uint32_t step =
       (capture->voltage.near_rail_count != 0U) ? 2U : 1U;
 
-    if ((uint32_t)previous.voltage_gain < step)
+    if (inductor_profile &&
+        (((uint32_t)previous.voltage_gain < step) ||
+         (((uint32_t)previous.voltage_gain - step) <
+          (uint32_t)LCR_AUTORANGE_INDUCTOR_MIN_V_GAIN)))
+    {
+      reduce_amplitude = true;
+      if (capture->voltage.near_rail_count != 0U)
+      {
+        amplitude_reduction_factor = 4U;
+      }
+    }
+    else if ((uint32_t)previous.voltage_gain < step)
     {
       reduce_amplitude = true;
       if (capture->voltage.near_rail_count != 0U)
@@ -341,24 +429,43 @@ HAL_StatusTypeDef LCR_AutorangeEvaluate(
   {
     const uint32_t factor =
       (!dsp->current.fundamental_valid ||
-       (capture->current.peak_to_peak <
-        (LCR_AUTORANGE_MIN_P2P_COUNTS / 4U))) ? 4U : 2U;
+       (dsp->current.bin[1].magnitude_milli_counts <
+        (LCR_AUTORANGE_MIN_H1_MILLI_COUNTS / 4U))) ? 4U : 2U;
 
-    if (!LCR_AutorangeFindCurrentProfile(
-          &previous, true, factor,
+    if (inductor_profile)
+    {
+      reasons |= LCR_AUTORANGE_REASON_I_LIMIT;
+      configuration_possible = false;
+    }
+    else if (!LCR_AutorangeFindCurrentProfile(
+          &previous, excitation.actual_frequency_hz, true, factor,
           &selected_feedback, &selected_current_gain))
     {
       reasons |= LCR_AUTORANGE_REASON_I_LIMIT;
       configuration_possible = false;
     }
   }
-  else if (current_high)
+  else if (current_reduce)
   {
     const uint32_t factor =
       (capture->current.near_rail_count != 0U) ? 4U : 2U;
 
-    if (!LCR_AutorangeFindCurrentProfile(
-          &previous, false, factor,
+    if (inductor_profile &&
+        (previous.current_gain == LCR_AUTORANGE_INDUCTOR_I_GAIN))
+    {
+      selected_feedback = LCR_FEEDBACK_100_OHM;
+      selected_current_gain = LCR_AUTORANGE_INDUCTOR_LOW_I_GAIN;
+    }
+    else if (inductor_profile)
+    {
+      reduce_amplitude = true;
+      if (capture->current.near_rail_count != 0U)
+      {
+        amplitude_reduction_factor = 4U;
+      }
+    }
+    else if (!LCR_AutorangeFindCurrentProfile(
+          &previous, excitation.actual_frequency_hz, false, factor,
           &selected_feedback, &selected_current_gain))
     {
       reduce_amplitude = true;

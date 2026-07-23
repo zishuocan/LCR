@@ -55,13 +55,22 @@
 /* USER CODE BEGIN PD */
 #define LCR_CAPTURE_SETTLING_TIME_MS 10U
 #define LCR_INTER_CAPTURE_TIME_MS 2U
-#define LCR_CONFIRMATION_FREQUENCY_HZ 1000U
+#define LCR_PRIMARY_FREQUENCY_HZ 10000U
+#define LCR_AMBIGUITY_FREQUENCY_HZ 1000U
+#define LCR_INDUCTOR_FREQUENCY_HZ 50000U
+#define LCR_INDUCTOR_SUSPECT_MIN_PHASE_MDEG 3000L
+#define LCR_INDUCTOR_SUSPECT_MIN_X_MOHM 200L
+#define LCR_INDUCTOR_SUSPECT_MAX_Z_MOHM 100000UL
 #define LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT 10000U
 #define LCR_CURRENT_THD_LIMIT_MILLIPERCENT 10000U
 #define LCR_CAPACITIVE_THD_MARGIN_MILLIPERCENT 3000U
 #define LCR_CAPACITIVE_THD_MAX_MILLIPERCENT 30000U
 #define LCR_CAPACITIVE_PHASE_MIN_MDEG 45000L
 #define LCR_CAPACITIVE_PHASE_MAX_MDEG 135000L
+#define LCR_INDUCTIVE_THD_MARGIN_MILLIPERCENT 3000U
+#define LCR_INDUCTIVE_THD_MAX_MILLIPERCENT 30000U
+#define LCR_INDUCTIVE_PHASE_MIN_MDEG (-170000L)
+#define LCR_INDUCTIVE_PHASE_MAX_MDEG (-90000L)
 
 #define LCR_QUALITY_VOLTAGE_RAIL       (1UL << 0)
 #define LCR_QUALITY_CURRENT_RAIL       (1UL << 1)
@@ -82,6 +91,13 @@
 COM_InitTypeDef BspCOMInit;
 
 /* USER CODE BEGIN PV */
+typedef enum
+{
+  LCR_SECONDARY_NONE = 0,
+  LCR_SECONDARY_AMBIGUITY_1KHZ,
+  LCR_SECONDARY_INDUCTOR_50KHZ
+} LCR_SecondaryMode;
+
 static volatile bool lcr_button_event = false;
 static uint32_t lcr_last_button_tick;
 static bool lcr_capture_scheduled;
@@ -89,7 +105,7 @@ static uint32_t lcr_capture_due_tick;
 static uint32_t lcr_capture_deadline_tick;
 static LCR_AutorangeSession lcr_autorange_session;
 static LCR_MeasurementSession lcr_measurement_session;
-static bool lcr_confirmation_active;
+static LCR_SecondaryMode lcr_secondary_mode;
 static LCR_ImpedanceResult lcr_primary_impedance;
 static uint32_t lcr_primary_frequency_hz;
 
@@ -101,11 +117,13 @@ void SystemClock_Config(void);
 static uint32_t LCR_EvaluateCaptureQuality(
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t *voltage_thd_limit_millipercent,
   uint32_t *current_thd_limit_millipercent);
 static void LCR_PrintCaptureQuality(
   uint32_t quality_flags,
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t voltage_thd_limit_millipercent,
   uint32_t current_thd_limit_millipercent,
   bool autorange_probe);
 static void LCR_PrintAutorangeReasons(uint32_t reason_flags);
@@ -121,6 +139,8 @@ static void LCR_FailWorkflow(LCR_WorkflowError error);
 static void LCR_PrintFinalResultSnapshot(void);
 static void LCR_UpdateDisplayFromFinalResult(void);
 static void LCR_UpdateDisplayMeasuring(uint32_t frequency_hz);
+static bool LCR_IsSuspectedInductor(
+  const LCR_ImpedanceResult *impedance);
 
 /* USER CODE END PFP */
 
@@ -157,6 +177,18 @@ static uint32_t LCR_GetCaptureTimeoutMs(void)
   return (uint32_t)timeout_ms;
 }
 
+static bool LCR_IsSuspectedInductor(
+  const LCR_ImpedanceResult *impedance)
+{
+  return (impedance != NULL) && impedance->valid &&
+         (impedance->reactance_milliohms >=
+          LCR_INDUCTOR_SUSPECT_MIN_X_MOHM) &&
+         (impedance->phase_millidegrees >=
+          LCR_INDUCTOR_SUSPECT_MIN_PHASE_MDEG) &&
+         (impedance->magnitude_milliohms <=
+          LCR_INDUCTOR_SUSPECT_MAX_Z_MOHM);
+}
+
 static void LCR_FailWorkflow(LCR_WorkflowError error)
 {
   LCR_MeasurementSummary measurement_summary;
@@ -178,7 +210,7 @@ static void LCR_FailWorkflow(LCR_WorkflowError error)
   lcr_capture_deadline_tick = 0U;
   LCR_MeasurementCancel(&lcr_measurement_session);
   LCR_AutorangeCancel(&lcr_autorange_session);
-  lcr_confirmation_active = false;
+  lcr_secondary_mode = LCR_SECONDARY_NONE;
   BSP_LED_Off(LED_GREEN);
   LCR_WorkflowFail(error);
   LCR_WorkflowGetStatus(&workflow_status);
@@ -249,10 +281,15 @@ static void LCR_UpdateDisplayMeasuring(uint32_t frequency_hz)
 static uint32_t LCR_EvaluateCaptureQuality(
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t *voltage_thd_limit_millipercent,
   uint32_t *current_thd_limit_millipercent)
 {
   uint32_t flags = 0U;
+  uint32_t voltage_thd_limit = LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT;
   uint32_t current_thd_limit = LCR_CURRENT_THD_LIMIT_MILLIPERCENT;
+  LCR_RangeStatus range_status;
+
+  LCR_RangeGetStatus(&range_status);
 
   /*
    * A capacitor differentiates the excitation waveform.  Its nth current
@@ -299,6 +336,57 @@ static uint32_t LCR_EvaluateCaptureQuality(
     }
   }
 
+  /*
+   * An inductor differentiates current into terminal voltage.  On the
+   * preferred low-impedance 100 ohm/1 kOhm feedback profiles, the nth voltage harmonic is
+   * therefore expected to be about n times the corresponding current
+   * harmonic.  Apply the symmetric bounded allowance only when the raw
+   * bridge phase is clearly inductive; this keeps resistor profiles on the
+   * original 10% V-THD limit.
+   */
+  if (((range_status.feedback_range == LCR_FEEDBACK_100_OHM) ||
+       (range_status.feedback_range == LCR_FEEDBACK_1K_OHM)) &&
+      dsp_result->voltage.fundamental_valid &&
+      dsp_result->current.fundamental_valid &&
+      (dsp_result->voltage_minus_current_millidegrees >=
+       LCR_INDUCTIVE_PHASE_MIN_MDEG) &&
+      (dsp_result->voltage_minus_current_millidegrees <=
+       LCR_INDUCTIVE_PHASE_MAX_MDEG))
+  {
+    float expected_harmonic_power = 0.0f;
+    uint32_t harmonic;
+
+    for (harmonic = 2U; harmonic <= LCR_DSP_MAX_HARMONIC; ++harmonic)
+    {
+      const float expected_ratio =
+        (float)harmonic *
+        (float)dsp_result->current.harmonic_ratio_millipercent[harmonic];
+
+      expected_harmonic_power += expected_ratio * expected_ratio;
+    }
+    {
+      const uint32_t expected_thd =
+        (uint32_t)(sqrtf(expected_harmonic_power) + 0.5f);
+      uint32_t derived_limit = expected_thd +
+        LCR_INDUCTIVE_THD_MARGIN_MILLIPERCENT;
+
+      if (derived_limit < LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT)
+      {
+        derived_limit = LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT;
+      }
+      if (derived_limit > LCR_INDUCTIVE_THD_MAX_MILLIPERCENT)
+      {
+        derived_limit = LCR_INDUCTIVE_THD_MAX_MILLIPERCENT;
+      }
+      voltage_thd_limit = derived_limit;
+    }
+  }
+
+  if (voltage_thd_limit_millipercent != NULL)
+  {
+    *voltage_thd_limit_millipercent = voltage_thd_limit;
+  }
+
   if (current_thd_limit_millipercent != NULL)
   {
     *current_thd_limit_millipercent = current_thd_limit;
@@ -322,7 +410,7 @@ static uint32_t LCR_EvaluateCaptureQuality(
   }
   if (dsp_result->voltage.fundamental_valid &&
       (dsp_result->voltage.thd_millipercent >
-       LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT))
+       voltage_thd_limit))
   {
     flags |= LCR_QUALITY_VOLTAGE_THD_HIGH;
   }
@@ -340,6 +428,7 @@ static void LCR_PrintCaptureQuality(
   uint32_t quality_flags,
   const LCR_CaptureSummary *summary,
   const LCR_DspCaptureResult *dsp_result,
+  uint32_t voltage_thd_limit_millipercent,
   uint32_t current_thd_limit_millipercent,
   bool autorange_probe)
 {
@@ -359,6 +448,13 @@ static void LCR_PrintCaptureQuality(
       printf("[LCR] quality model=CAPACITIVE_HARMONIC; I_THD limit=%lu.%03lu%% derived from V harmonics plus margin\r\n",
              (unsigned long)(current_thd_limit_millipercent / 1000U),
              (unsigned long)(current_thd_limit_millipercent % 1000U));
+    }
+    if (voltage_thd_limit_millipercent >
+        LCR_VOLTAGE_THD_LIMIT_MILLIPERCENT)
+    {
+      printf("[LCR] quality model=INDUCTIVE_HARMONIC; V_THD limit=%lu.%03lu%% derived from I harmonics plus margin\r\n",
+             (unsigned long)(voltage_thd_limit_millipercent / 1000U),
+             (unsigned long)(voltage_thd_limit_millipercent % 1000U));
     }
     return;
   }
@@ -385,9 +481,11 @@ static void LCR_PrintCaptureQuality(
   }
   if ((quality_flags & LCR_QUALITY_VOLTAGE_THD_HIGH) != 0U)
   {
-    printf(" V_THD=%lu.%03lu%%>10.000%%",
+    printf(" V_THD=%lu.%03lu%%>%lu.%03lu%%",
            (unsigned long)(dsp_result->voltage.thd_millipercent / 1000U),
-           (unsigned long)(dsp_result->voltage.thd_millipercent % 1000U));
+           (unsigned long)(dsp_result->voltage.thd_millipercent % 1000U),
+           (unsigned long)(voltage_thd_limit_millipercent / 1000U),
+           (unsigned long)(voltage_thd_limit_millipercent % 1000U));
   }
   if ((quality_flags & LCR_QUALITY_CURRENT_THD_HIGH) != 0U)
   {
@@ -434,6 +532,14 @@ static void LCR_PrintAutorangeReasons(uint32_t reason_flags)
   if ((reason_flags & LCR_AUTORANGE_REASON_MAX_ADJUSTMENT) != 0U)
   {
     printf(" MAX_ADJUSTMENTS");
+  }
+  if ((reason_flags & LCR_AUTORANGE_REASON_V_THD_HIGH) != 0U)
+  {
+    printf(" V_THD_HIGH");
+  }
+  if ((reason_flags & LCR_AUTORANGE_REASON_I_THD_HIGH) != 0U)
+  {
+    printf(" I_THD_HIGH");
   }
   if (reason_flags == 0U)
   {
@@ -545,10 +651,12 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
       &measurement_summary);
     lcr_capture_scheduled = false;
     BSP_LED_Off(LED_GREEN);
-    printf("[LCR] measurement summary: attempts=%lu eligible=%lu ineligible=%lu\r\n",
+    printf("[LCR] measurement summary: attempts=%lu eligible=%lu ineligible=%lu retained=%lu outliers=%lu\r\n",
            (unsigned long)measurement_summary.attempt_count,
            (unsigned long)measurement_summary.eligible_count,
-           (unsigned long)measurement_summary.ineligible_count);
+           (unsigned long)measurement_summary.ineligible_count,
+           (unsigned long)measurement_summary.retained_count,
+           (unsigned long)measurement_summary.outlier_count);
     if (stop_status != HAL_OK)
     {
       printf("[LCR] excitation stop failed at measurement boundary: HAL=%u\r\n",
@@ -558,8 +666,10 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
     }
     if (!measurement_summary.average_valid)
     {
-      printf("[LCR] average unavailable: no eligible impedance samples\r\n");
-      if (lcr_confirmation_active)
+      printf("[LCR] average unavailable: fewer than %u valid samples in %u attempts, or too few samples remained after outlier rejection\r\n",
+             (unsigned int)LCR_MEASUREMENT_MIN_VALID_COUNT,
+             (unsigned int)LCR_MEASUREMENT_MAX_ATTEMPT_COUNT);
+      if (lcr_secondary_mode != LCR_SECONDARY_NONE)
       {
         printf("[LCR] multi-frequency confirmation unavailable because secondary average is invalid\r\n");
         LCR_FailWorkflow(LCR_WORKFLOW_ERROR_CONFIRMATION_INVALID);
@@ -577,7 +687,7 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
 
       printf("[LCR] average %s Z: R=%ld.%03lu ohm, X=%ld.%03lu ohm, |Z|=%lu.%03lu ohm, phase=%ld.%03lu deg\r\n",
              measurement_summary.average_is_calibrated ?
-               "calibrated" : "raw",
+               "CALIBRATED" : "RAW/UNCALIBRATED",
              (long)(measurement_summary.average.resistance_milliohms / 1000L),
              (unsigned long)labs(
                measurement_summary.average.resistance_milliohms % 1000L),
@@ -591,7 +701,7 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
                 measurement_summary.average.phase_millidegrees % 1000L));
       LCR_ExcitationGetStatus(&excitation_status);
       LCR_ResultStoreMeasurement(
-        lcr_confirmation_active,
+        lcr_secondary_mode != LCR_SECONDARY_NONE,
         excitation_status.actual_frequency_hz,
         lcr_autorange_session.probe_count,
         &measurement_summary);
@@ -602,11 +712,27 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
       {
         LCR_PrintComponentResult(
           &component,
-          lcr_confirmation_active ?
-            "secondary-8-capture-average" :
-            "primary-8-capture-average");
+          (lcr_secondary_mode != LCR_SECONDARY_NONE) ?
+            "secondary-valid-sample-average" :
+            "primary-valid-sample-average");
 
-        if (lcr_confirmation_active)
+        if (lcr_secondary_mode == LCR_SECONDARY_INDUCTOR_50KHZ)
+        {
+          if ((component.type != LCR_COMPONENT_INDUCTOR) ||
+              !component.parameter_valid ||
+              (component.parameter_frequency_hz !=
+               LCR_INDUCTOR_FREQUENCY_HZ))
+          {
+            printf("[LCR] 50 kHz formal measurement did not confirm an inductor\r\n");
+            LCR_FailWorkflow(LCR_WORKFLOW_ERROR_CONFIRMATION_INVALID);
+            return;
+          }
+
+          printf("[LCR] inductor result accepted from 50 kHz formal measurement; 10 kHz data was coarse-detection only\r\n");
+          LCR_ResultComplete(&component);
+          lcr_secondary_mode = LCR_SECONDARY_NONE;
+        }
+        else if (lcr_secondary_mode == LCR_SECONDARY_AMBIGUITY_1KHZ)
         {
           LCR_ComponentResult confirmed_component;
 
@@ -622,7 +748,7 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
           {
             LCR_PrintComponentResult(
               &confirmed_component,
-              "two-frequency-confirmed");
+              "two-frequency-consistency-check");
             LCR_ResultComplete(&confirmed_component);
           }
           else
@@ -631,21 +757,34 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
             LCR_FailWorkflow(LCR_WORKFLOW_ERROR_CONFIRMATION_INVALID);
             return;
           }
-          lcr_confirmation_active = false;
+          lcr_secondary_mode = LCR_SECONDARY_NONE;
         }
-        else if ((component.type == LCR_COMPONENT_UNKNOWN) &&
-                 (excitation_status.actual_frequency_hz !=
-                  LCR_CONFIRMATION_FREQUENCY_HZ) &&
-                 (stop_status == HAL_OK))
+        else if ((stop_status == HAL_OK) &&
+                 (LCR_IsSuspectedInductor(
+                    &measurement_summary.average) ||
+                  ((component.type == LCR_COMPONENT_UNKNOWN) &&
+                   (excitation_status.actual_frequency_hz !=
+                    LCR_AMBIGUITY_FREQUENCY_HZ))))
         {
           HAL_StatusTypeDef confirmation_status;
+          uint32_t secondary_frequency_hz;
 
           lcr_primary_impedance = measurement_summary.average;
           lcr_primary_frequency_hz =
             excitation_status.actual_frequency_hz;
-          lcr_confirmation_active = true;
+          if (LCR_IsSuspectedInductor(&measurement_summary.average))
+          {
+            lcr_secondary_mode = LCR_SECONDARY_INDUCTOR_50KHZ;
+            secondary_frequency_hz = LCR_INDUCTOR_FREQUENCY_HZ;
+            printf("[LCR] 10 kHz coarse result is inductive; starting dedicated 50 kHz formal measurement\r\n");
+          }
+          else
+          {
+            lcr_secondary_mode = LCR_SECONDARY_AMBIGUITY_1KHZ;
+            secondary_frequency_hz = LCR_AMBIGUITY_FREQUENCY_HZ;
+          }
           confirmation_status = LCR_SetFrequency(
-            LCR_CONFIRMATION_FREQUENCY_HZ);
+            secondary_frequency_hz);
           if (confirmation_status == HAL_OK)
           {
             confirmation_status = LCR_AutorangeBegin(
@@ -669,7 +808,7 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
               HAL_GetTick() + LCR_CAPTURE_SETTLING_TIME_MS;
             lcr_capture_scheduled = true;
             confirmation_started = true;
-            printf("[LCR] ambiguity retained; starting automatic %lu Hz confirmation\r\n",
+            printf("[LCR] starting automatic %lu Hz secondary measurement\r\n",
                    (unsigned long)confirmation_excitation.actual_frequency_hz);
             printf("[LCR] confirmation autorange probe scheduled after %u ms settling\r\n",
                    (unsigned int)LCR_CAPTURE_SETTLING_TIME_MS);
@@ -691,7 +830,7 @@ static void LCR_ScheduleNextCaptureOrFinish(void)
       {
         printf("[LCR] component classification unavailable\r\n");
         LCR_FailWorkflow(
-          lcr_confirmation_active ?
+          (lcr_secondary_mode != LCR_SECONDARY_NONE) ?
             LCR_WORKFLOW_ERROR_CONFIRMATION_INVALID :
             LCR_WORKFLOW_ERROR_DFT);
         return;
@@ -867,16 +1006,22 @@ int main(void)
            (unsigned long)LCR_GetPgaGainValue(range_status.voltage_gain),
            (unsigned long)LCR_GetPgaGainValue(range_status.current_gain));
     printf("[LCR] ADC mapping: low16=ADC1/PA0/V_AMP, high16=ADC2/PA1/I_AMP\r\n");
-    printf("[LCR] autorange window: p2p=%u..%u counts, max adjustments=%u\r\n",
-           (unsigned int)LCR_AUTORANGE_MIN_P2P_COUNTS,
+    printf("[LCR] autorange H1 target=%lu.%03lu..%lu.%03lu counts; p2p auxiliary low=%u, clip=%u; max adjustments=%u\r\n",
+           (unsigned long)(LCR_AUTORANGE_MIN_H1_MILLI_COUNTS / 1000U),
+           (unsigned long)(LCR_AUTORANGE_MIN_H1_MILLI_COUNTS % 1000U),
+           (unsigned long)(LCR_AUTORANGE_MAX_H1_MILLI_COUNTS / 1000U),
+           (unsigned long)(LCR_AUTORANGE_MAX_H1_MILLI_COUNTS % 1000U),
+           (unsigned int)LCR_AUTORANGE_MIN_AUX_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_ADJUSTMENTS);
-    printf("[LCR] autorange current PGA maximum=%lux; all four feedback profiles remain candidates\r\n",
+    printf("[LCR] general autorange current PGA maximum=%lux; all four feedback profiles remain candidates below 50 kHz\r\n",
            (unsigned long)LCR_GetPgaGainValue(
              LCR_AUTORANGE_MAX_CURRENT_GAIN));
     printf("[LCR] frequency profiles: 1/10 kHz use 64 points; up to 25 kHz use 32; 50 kHz high-frequency profile uses 16\r\n");
-    printf("[LCR] output is stopped; press PC13 to autorange, then take %u captures of %u pairs\r\n",
-           (unsigned int)LCR_MEASUREMENT_ATTEMPT_COUNT,
+    printf("[LCR] inductor flow: 10 kHz coarse classification, then 50 kHz formal measurement; feedback=100 ohm, I=2x (V64/I1 fallback), V=8/16/32/64x\r\n");
+    printf("[LCR] output is stopped; press PC13 to autorange, then collect %u valid samples in at most %u captures of %u pairs\r\n",
+           (unsigned int)LCR_MEASUREMENT_MIN_VALID_COUNT,
+           (unsigned int)LCR_MEASUREMENT_MAX_ATTEMPT_COUNT,
            (unsigned int)LCR_CAPTURE_SAMPLE_COUNT);
   }
 
@@ -904,10 +1049,10 @@ int main(void)
         }
         else
         {
-          lcr_confirmation_active = false;
+          lcr_secondary_mode = LCR_SECONDARY_NONE;
           LCR_ResultBegin();
           operation_status = LCR_SetFrequency(
-            LCR_EXCITATION_DEFAULT_FREQUENCY_HZ);
+            LCR_PRIMARY_FREQUENCY_HZ);
           if (operation_status == HAL_OK)
           {
             operation_status = LCR_AutorangeBegin(&lcr_autorange_session);
@@ -948,7 +1093,7 @@ int main(void)
               &measurement_summary);
             LCR_MeasurementCancel(&lcr_measurement_session);
             LCR_AutorangeCancel(&lcr_autorange_session);
-            lcr_confirmation_active = false;
+            lcr_secondary_mode = LCR_SECONDARY_NONE;
             LCR_ResultStoreMeasurement(
               LCR_WorkflowIsConfirmation(),
               status.actual_frequency_hz,
@@ -1001,7 +1146,7 @@ int main(void)
             &measurement_summary);
           printf("[LCR] dual ADC capture %lu/%u started; timeout=%lu ms\r\n",
                  (unsigned long)(measurement_summary.attempt_count + 1U),
-                 (unsigned int)LCR_MEASUREMENT_ATTEMPT_COUNT,
+                 (unsigned int)LCR_MEASUREMENT_MAX_ATTEMPT_COUNT,
                  (unsigned long)capture_timeout_ms);
         }
       }
@@ -1039,6 +1184,8 @@ int main(void)
         bool measurement_result_available = false;
         bool measurement_result_calibrated = false;
         bool measurement_result_eligible = false;
+        bool autorange_voltage_thd_ok = false;
+        bool autorange_current_thd_ok = false;
 
         lcr_capture_deadline_tick = 0U;
 
@@ -1069,14 +1216,20 @@ int main(void)
               dsp_excitation_status.samples_per_period,
               &dsp_result) == HAL_OK)
           {
+          uint32_t voltage_thd_limit_millipercent;
           uint32_t current_thd_limit_millipercent;
           const uint32_t quality_flags = LCR_EvaluateCaptureQuality(
             &summary,
             &dsp_result,
+            &voltage_thd_limit_millipercent,
             &current_thd_limit_millipercent);
 
           dsp_result_available = true;
           measurement_result_eligible = quality_flags == 0U;
+          autorange_voltage_thd_ok =
+            (quality_flags & LCR_QUALITY_VOLTAGE_THD_HIGH) == 0U;
+          autorange_current_thd_ok =
+            (quality_flags & LCR_QUALITY_CURRENT_THD_HIGH) == 0U;
 
           printf("[LCR] V H1=%lu.%03lu counts phase=%ld.%03lu deg THD2-5=%lu.%03lu%%\r\n",
                  (unsigned long)(dsp_result.voltage.bin[1].magnitude_milli_counts / 1000U),
@@ -1098,6 +1251,7 @@ int main(void)
             quality_flags,
             &summary,
             &dsp_result,
+            voltage_thd_limit_millipercent,
             current_thd_limit_millipercent,
             autorange_probe);
           if (dsp_result.current.fundamental_valid)
@@ -1154,6 +1308,18 @@ int main(void)
               {
                 measurement_result = calibrated_impedance;
                 measurement_result_calibrated = true;
+                if ((excitation_status.actual_frequency_hz == 25000U) &&
+                    (impedance.reactance_milliohms > 0) &&
+                    (impedance.phase_millidegrees >=
+                     LCR_COMPONENT_REACTIVE_PHASE_MIN_MDEG))
+                {
+                  printf("[LCR] calibration=PROVISIONAL_25KHZ_INDUCTANCE_2POINT; references=47uH,100uH nominal\r\n");
+                }
+                else if (excitation_status.actual_frequency_hz ==
+                         LCR_INDUCTOR_FREQUENCY_HZ)
+                {
+                  printf("[LCR] calibration=50KHZ_PROFILE_AFFINE; Z=(Zraw-Zshort)*K for exact feedback/Vgain/Igain\r\n");
+                }
                 printf("[LCR] calibrated Z: R=%ld.%03lu ohm, X=%ld.%03lu ohm, |Z|=%lu.%03lu ohm, phase=%ld.%03lu deg\r\n",
                        (long)(calibrated_impedance.resistance_milliohms / 1000L),
                        (unsigned long)labs(calibrated_impedance.resistance_milliohms % 1000L),
@@ -1166,7 +1332,7 @@ int main(void)
               }
               else
               {
-                printf("[LCR] no calibration point for current frequency/range/gain\r\n");
+                printf("[LCR] calibration=UNAVAILABLE for current frequency/range/gain; result remains RAW/UNCALIBRATED\r\n");
               }
             }
             else
@@ -1194,6 +1360,8 @@ int main(void)
               &lcr_autorange_session,
               &summary,
               &dsp_result,
+              autorange_voltage_thd_ok,
+              autorange_current_thd_ok,
               &evaluation);
 
             if (autorange_status == HAL_OK)
@@ -1236,8 +1404,10 @@ int main(void)
                          (unsigned long)LCR_GetPgaGainValue(
                            evaluation.selected_range.current_gain));
                 }
-                printf("[LCR] autorange probes remain in log but are excluded; starting %u fresh measurement captures\r\n",
-                       (unsigned int)LCR_MEASUREMENT_ATTEMPT_COUNT);
+                printf("[LCR] autorange probes remain in log but are excluded; after %u ms settling, collect at least %u valid fresh samples in at most %u attempts\r\n",
+                       (unsigned int)LCR_CAPTURE_SETTLING_TIME_MS,
+                       (unsigned int)LCR_MEASUREMENT_MIN_VALID_COUNT,
+                       (unsigned int)LCR_MEASUREMENT_MAX_ATTEMPT_COUNT);
               }
               else
               {

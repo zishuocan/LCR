@@ -11,13 +11,16 @@ extern "C" {
 #include "lcr_impedance.h"
 #include "stm32g4xx_hal.h"
 
-#define LCR_MEASUREMENT_ATTEMPT_COUNT 8U
+#define LCR_MEASUREMENT_MIN_VALID_COUNT 5U
+#define LCR_MEASUREMENT_MAX_ATTEMPT_COUNT 16U
 
 typedef struct
 {
   uint32_t attempt_count;
   uint32_t eligible_count;
   uint32_t ineligible_count;
+  uint32_t retained_count;
+  uint32_t outlier_count;
   bool average_valid;
   bool average_is_calibrated;
   LCR_ImpedanceResult average;
@@ -27,8 +30,7 @@ typedef struct
 {
   uint32_t attempt_count;
   uint32_t eligible_count;
-  int64_t resistance_sum_milliohms;
-  int64_t reactance_sum_milliohms;
+  LCR_ImpedanceResult eligible_samples[LCR_MEASUREMENT_MAX_ATTEMPT_COUNT];
   bool active;
   bool result_source_set;
   bool result_is_calibrated;

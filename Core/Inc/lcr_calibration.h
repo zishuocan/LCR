@@ -6,10 +6,13 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "lcr_impedance.h"
 #include "lcr_range.h"
 #include "stm32g4xx_hal.h"
+
+#define LCR_INDUCTOR_PROFILE_COUNT 5U
 
 HAL_StatusTypeDef LCR_CalibrationApply(
   const LCR_ImpedanceResult *raw_result,
@@ -18,6 +21,12 @@ HAL_StatusTypeDef LCR_CalibrationApply(
   LCR_PgaGain voltage_gain,
   LCR_PgaGain current_gain,
   LCR_ImpedanceResult *calibrated_result);
+
+/* The dedicated 50 kHz inductor flow may lock only one of these profiles. */
+bool LCR_CalibrationIsInductorProfileSupported(
+  LCR_FeedbackRange feedback_range,
+  LCR_PgaGain voltage_gain,
+  LCR_PgaGain current_gain);
 
 #ifdef __cplusplus
 }

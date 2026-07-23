@@ -49,7 +49,6 @@ typedef struct
   LCR_FeedbackRange feedback_range;
   LCR_PgaGain voltage_gain;
   LCR_PgaGain current_gain;
-  bool feedback_fallback_active;
 } LCR_RangeStatus;
 
 HAL_StatusTypeDef LCR_RangeInit(void);

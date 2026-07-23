@@ -44,8 +44,7 @@ void LCR_ResultStoreMeasurement(
   destination->present =
     (measurement->attempt_count != 0U) ||
     (autorange_probe_count != 0U);
-  destination->complete =
-    measurement->attempt_count >= LCR_MEASUREMENT_ATTEMPT_COUNT;
+  destination->complete = measurement->average_valid;
   destination->frequency_hz = frequency_hz;
   destination->autorange_probe_count = autorange_probe_count;
   destination->measurement = *measurement;
