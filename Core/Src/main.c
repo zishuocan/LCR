@@ -1014,11 +1014,11 @@ int main(void)
            (unsigned int)LCR_AUTORANGE_MIN_AUX_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_P2P_COUNTS,
            (unsigned int)LCR_AUTORANGE_MAX_ADJUSTMENTS);
-    printf("[LCR] general autorange current PGA maximum=%lux; all four feedback profiles remain candidates below 50 kHz\r\n",
+    printf("[LCR] general autorange current PGA maximum=%lux; all four feedback profiles remain candidates at every measurement frequency\r\n",
            (unsigned long)LCR_GetPgaGainValue(
              LCR_AUTORANGE_MAX_CURRENT_GAIN));
     printf("[LCR] frequency profiles: 1/10 kHz use 64 points; up to 25 kHz use 32; 50 kHz high-frequency profile uses 16\r\n");
-    printf("[LCR] inductor flow: 10 kHz coarse classification, then 50 kHz formal measurement; feedback=100 ohm, I=2x (V64/I1 fallback), V=8/16/32/64x\r\n");
+    printf("[LCR] inductor flow: 10 kHz coarse classification, then 50 kHz formal measurement; V/I/R use the common autorange algorithm\r\n");
     printf("[LCR] output is stopped; press PC13 to autorange, then collect %u valid samples in at most %u captures of %u pairs\r\n",
            (unsigned int)LCR_MEASUREMENT_MIN_VALID_COUNT,
            (unsigned int)LCR_MEASUREMENT_MAX_ATTEMPT_COUNT,
@@ -1308,18 +1308,7 @@ int main(void)
               {
                 measurement_result = calibrated_impedance;
                 measurement_result_calibrated = true;
-                if ((excitation_status.actual_frequency_hz == 25000U) &&
-                    (impedance.reactance_milliohms > 0) &&
-                    (impedance.phase_millidegrees >=
-                     LCR_COMPONENT_REACTIVE_PHASE_MIN_MDEG))
-                {
-                  printf("[LCR] calibration=PROVISIONAL_25KHZ_INDUCTANCE_2POINT; references=47uH,100uH nominal\r\n");
-                }
-                else if (excitation_status.actual_frequency_hz ==
-                         LCR_INDUCTOR_FREQUENCY_HZ)
-                {
-                  printf("[LCR] calibration=50KHZ_PROFILE_AFFINE; Z=(Zraw-Zshort)*K for exact feedback/Vgain/Igain\r\n");
-                }
+                printf("[LCR] calibration=EXACT_PROFILE for current frequency/range/gain\r\n");
                 printf("[LCR] calibrated Z: R=%ld.%03lu ohm, X=%ld.%03lu ohm, |Z|=%lu.%03lu ohm, phase=%ld.%03lu deg\r\n",
                        (long)(calibrated_impedance.resistance_milliohms / 1000L),
                        (unsigned long)labs(calibrated_impedance.resistance_milliohms % 1000L),
