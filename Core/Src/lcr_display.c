@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "i2c.h"
+#include "lcr_range.h"
 
 #define LCR_DISPLAY_PROBE_TRIALS     2U
 #define LCR_DISPLAY_PROBE_TIMEOUT_MS 5U
@@ -347,6 +348,8 @@ static void LCR_DisplayDrawMeasurement(
   const LCR_FinalResult *result,
   const LCR_ResultMeasurement *measurement)
 {
+  LCR_RangeStatus range_status;
+  const LCR_FeedbackNetwork *feedback;
   char frequency[12];
   char resistance[14];
   char reactance[14];
@@ -450,6 +453,39 @@ static void LCR_DisplayDrawMeasurement(
     6U,
     measurement->measurement.average_is_calibrated ?
       "CALIBRATED" : "RAW UNCALIBRATED");
+
+  LCR_RangeGetStatus(&range_status);
+  feedback = LCR_GetFeedbackNetwork(range_status.feedback_range);
+  if (feedback != NULL)
+  {
+    const uint32_t resistance_ohms = feedback->resistance_ohms;
+    const uint32_t voltage_gain =
+      LCR_GetPgaGainValue(range_status.voltage_gain);
+    const uint32_t current_gain =
+      LCR_GetPgaGainValue(range_status.current_gain);
+
+    if (resistance_ohms >= 1000U)
+    {
+      (void)snprintf(
+        line,
+        sizeof(line),
+        "V%luX I%luX R%luK",
+        (unsigned long)voltage_gain,
+        (unsigned long)current_gain,
+        (unsigned long)(resistance_ohms / 1000U));
+    }
+    else
+    {
+      (void)snprintf(
+        line,
+        sizeof(line),
+        "V%luX I%luX R%lu",
+        (unsigned long)voltage_gain,
+        (unsigned long)current_gain,
+        (unsigned long)resistance_ohms);
+    }
+    LCR_DisplayDrawText(7U, line);
+  }
 }
 
 static bool LCR_DisplayAddressResponds(uint8_t address_7bit)
@@ -621,7 +657,7 @@ HAL_StatusTypeDef LCR_DisplayShowMeasuring(uint32_t frequency_hz)
   LCR_DisplayDrawText(0U, "LCR MEASURING");
   (void)snprintf(line, sizeof(line), "F=%s", frequency);
   LCR_DisplayDrawText(2U, line);
-  LCR_DisplayDrawText(4U, "AUTO RANGE + 8 AVG");
+  LCR_DisplayDrawText(4U, "AUTO RANGE + AVG");
   LCR_DisplayDrawText(6U, "PLEASE WAIT");
   return LCR_DisplayFlush();
 }
@@ -667,12 +703,7 @@ HAL_StatusTypeDef LCR_DisplayShowResult(const LCR_FinalResult *result)
   switch (result->state)
   {
     case LCR_RESULT_COMPLETE:
-      (void)snprintf(
-        line,
-        sizeof(line),
-        "LCR RESULT #%lu",
-        (unsigned long)result->sequence_id);
-      LCR_DisplayDrawText(0U, line);
+      LCR_DisplayDrawText(0U, "LCR RESULT");
       if ((measurement != NULL) &&
           measurement->measurement.average_valid &&
           result->component_valid)
@@ -683,7 +714,6 @@ HAL_StatusTypeDef LCR_DisplayShowResult(const LCR_FinalResult *result)
       {
         LCR_DisplayDrawText(2U, "RESULT DATA INVALID");
       }
-      LCR_DisplayDrawText(7U, "PRESS TO MEASURE");
       break;
 
     case LCR_RESULT_ABORTED:
